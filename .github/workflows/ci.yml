@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Separate job, not a second step in the same job: if both builds ran on the same runner,
+  # Gradle's own local cache (~/.gradle/caches, untouched by `clean`) could explain a cache hit
+  # on build two just as well as the remote one could - that wouldn't actually prove anything
+  # about the Build Cache Node. A fresh runner for build two has no local cache at all, so any
+  # FROM-CACHE task outcome it shows can only have come from the remote cache.
+  first-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # Needs real credentials: pushing to the cache requires the "ci" user
+      # (anonymousLevel is "read" on the Build Cache Node - see platform/apps/build-cache-node).
+      - name: Build (populates the remote cache)
+        run: |
+          ./gradlew clean build \
+            -PbuildCache.url="${{ vars.BUILD_CACHE_URL }}" \
+            -PbuildCache.username=ci \
+            -PbuildCache.password="${{ secrets.BUILD_CACHE_PASSWORD }}" \
+            -PbuildCache.push=true
+
+  second-build:
+    needs: first-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # No credentials here, deliberately: anonymous *read* already works (anonymousLevel
+      # "read"), and the point of this job is to show that a build with nothing but a URL -
+      # not even a PR from a fork would need a secret - gets cache hits.
+      - name: Build (should hit the remote cache from the previous job)
+        run: |
+          ./gradlew clean build \
+            -PbuildCache.url="${{ vars.BUILD_CACHE_URL }}" \
+            --build-cache | tee second-build.log
+      - name: Confirm at least one task came FROM-CACHE
+        run: |
+          if grep -q "FROM-CACHE" second-build.log; then
+            echo "Cache hit confirmed - at least one task outcome was FROM-CACHE."
+          else
+            echo "::error::No FROM-CACHE task outcome found in the second build's output."
+            exit 1
+          fi
+
+  # Builds the deployable image. Deliberately after, not instead of, the two jobs above - this
+  # doesn't need to prove anything about caching, just needs *a* built jar, so it reuses
+  # whatever build-and-cache-demo's own build produced rather than compiling a third time.
+  image:
+    needs: second-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: ./gradlew bootJar
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/liambarkley/demo-spring-app:${{ github.sha }},ghcr.io/liambarkley/demo-spring-app:latest
