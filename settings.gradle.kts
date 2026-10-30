@@ -17,6 +17,11 @@ buildCache {
             setUrl(url.get())
         }
         isPush = providers.gradleProperty("buildCache.push").map { it.toBoolean() }.getOrElse(false)
+        // Gradle refuses a plain-HTTP remote cache URL by default, specifically because
+        // credentials would travel in cleartext - exactly the trade-off already documented in
+        // platform/apps/build-cache-node's README (no domain available for an ACM
+        // certificate). Opting in explicitly, not silently working around it.
+        isAllowInsecureProtocol = true
         credentials {
             username = providers.gradleProperty("buildCache.username").orNull
             password = providers.gradleProperty("buildCache.password").orNull
