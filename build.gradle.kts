@@ -27,6 +27,10 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // Phase 4: exposes /actuator/prometheus (Micrometer's own registry, not just actuator's
+    // default JSON) so platform/apps/demo-spring-app's ServiceMonitor has something to scrape -
+    // request latency (http_server_requests_seconds) specifically.
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")

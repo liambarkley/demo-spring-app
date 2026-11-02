@@ -17,7 +17,9 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # prometheus added phase 4: platform/apps/demo-spring-app's ServiceMonitor scrapes
+        # this for request latency (http_server_requests_seconds).
+        include: health,prometheus
   endpoint:
     health:
       probes:
