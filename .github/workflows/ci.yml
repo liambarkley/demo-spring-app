@@ -6,12 +6,44 @@ on:
   pull_request:
 
 jobs:
+  # The Build Cache Node's ALB gets a brand-new DNS name every time infra/envs/dev is
+  # destroyed and recreated (see docs/PLAN.md) - this used to be a manually-updated
+  # BUILD_CACHE_URL repo variable, the one step scripts/up.sh could never automate itself
+  # (editing a different repo's CI config is a human decision, not something either
+  # teardown/bring-up script does). Resolved live instead, via a narrowly-scoped read-only
+  # role (infra/ci-oidc) that can only call tag:GetResources and
+  # elasticloadbalancing:DescribeLoadBalancers - nothing state-changing. One job, not
+  # duplicated in both build jobs below, so the lookup only happens once per run.
+  resolve-cache-url:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      url: ${{ steps.resolve.outputs.url }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CACHE_LOOKUP_ROLE_ARN }}
+          aws-region: ca-central-1
+      - id: resolve
+        name: Find the Build Cache Node's ALB by its project=build-cache tag
+        run: |
+          ARN=$(aws resourcegroupstaggingapi get-resources \
+            --tag-filters Key=project,Values=build-cache \
+            --resource-type-filters elasticloadbalancing:loadbalancer \
+            --query 'ResourceTagMappingList[0].ResourceARN' --output text)
+          DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ARN" \
+            --query 'LoadBalancers[0].DNSName' --output text)
+          echo "url=http://$DNS/cache/" >> "$GITHUB_OUTPUT"
+
   # Separate job, not a second step in the same job: if both builds ran on the same runner,
   # Gradle's own local cache (~/.gradle/caches, untouched by `clean`) could explain a cache hit
   # on build two just as well as the remote one could - that wouldn't actually prove anything
   # about the Build Cache Node. A fresh runner for build two has no local cache at all, so any
   # FROM-CACHE task outcome it shows can only have come from the remote cache.
   first-build:
+    needs: resolve-cache-url
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,13 +56,13 @@ jobs:
       - name: Build (populates the remote cache)
         run: |
           ./gradlew clean build \
-            -PbuildCache.url="${{ vars.BUILD_CACHE_URL }}" \
+            -PbuildCache.url="${{ needs.resolve-cache-url.outputs.url }}" \
             -PbuildCache.username=ci \
             -PbuildCache.password="${{ secrets.BUILD_CACHE_PASSWORD }}" \
             -PbuildCache.push=true
 
   second-build:
-    needs: first-build
+    needs: [resolve-cache-url, first-build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +76,7 @@ jobs:
       - name: Build (should hit the remote cache from the previous job)
         run: |
           ./gradlew clean build \
-            -PbuildCache.url="${{ vars.BUILD_CACHE_URL }}" \
+            -PbuildCache.url="${{ needs.resolve-cache-url.outputs.url }}" \
             --build-cache | tee second-build.log
       - name: Confirm at least one task came FROM-CACHE
         run: |
